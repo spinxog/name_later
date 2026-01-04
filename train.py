@@ -83,6 +83,9 @@ def train_epoch(model, dataloader, optimizer, device, use_nce=False):
         # Resize outputs to match masks if needed
         if outputs.shape[-2:] != masks.shape[-2:]:
             outputs = nn.functional.interpolate(outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False)
+        # Clear cache after each batch
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
 
         if use_nce and hasattr(model, 'backbone'):
             features = model.backbone(images)  # Get features for NCE
@@ -106,6 +109,9 @@ def validate_epoch(model, dataloader, device):
             outputs = model(images)
             loss = bce_dice_loss(outputs, masks)
             total_loss += loss.item()
+            # Clear cache after each batch
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
 
             preds = torch.sigmoid(outputs) > 0.5
             all_preds.extend(preds.cpu().numpy().flatten())
@@ -116,9 +122,9 @@ def validate_epoch(model, dataloader, device):
 
 def pretrain_on_synthetic(model, device, epochs=20):
     print("Pretraining on synthetic data...")
-    synthetic_dataset = ForgeryDataset('data/synthetic/images', 'data/synthetic/masks',
-                                       transform=get_transforms(True), is_train=True, synthetic=False)
-    synthetic_loader = DataLoader(synthetic_dataset, batch_size=2, shuffle=True, num_workers=1)
+    synthetic_dataset = ForgeryDataset(None, None,
+                                       transform=get_transforms(True), is_train=True, synthetic=True)
+    synthetic_loader = DataLoader(synthetic_dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=False)
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
@@ -179,8 +185,8 @@ def finetune_on_real(model, device, epochs=30, k_folds=5):
         val_dataset.mask_paths = [val_subset.dataset.mask_paths[i] for i in val_idx]
         val_dataset.transform = get_transforms(False)
 
-        train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
-        val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
+        train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=False)
+        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=False)
 
         # Check for existing checkpoint for this fold
         fold_checkpoint_path = f'finetuned_fold_{fold+1}_checkpoint.pth'
@@ -233,6 +239,9 @@ def finetune_on_real(model, device, epochs=30, k_folds=5):
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+        torch.cuda.set_per_process_memory_fraction(0.8)  # Limit to 80% of GPU memory
 
     # Model
     model = ForgeryDetectionModel(head_type='correlation_transformer').to(device)
